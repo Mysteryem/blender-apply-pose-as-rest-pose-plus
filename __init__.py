@@ -1,0 +1,426 @@
+bl_info = {
+    "name": "Apply Pose as Rest Pose Plus",
+    "author": "Mysteryem",
+    "version": (0, 0, 1),
+    "blender": (3, 3, 0),
+    "location": "Pose > Apply > Apply Pose as Rest Pose Plus",
+    "description": "Apply Pose as Rest Pose, but also applies to meshes rigged to the armature. Supports shape keys.",
+    "doc_url": "https://github.com/Mysteryem/blender-apply-pose-as-rest-pose-plus",
+    "tracker_url": "https://github.com/Mysteryem/blender-apply-pose-as-rest-pose-plus/issues",
+    "category": "Rigging",
+}
+#     Apply Pose as Rest Pose Plus Blender add-on
+#     Copyright (C) 2022-2024 Thomas Barlow (Mysteryem)
+#
+#     This program is free software: you can redistribute it and/or modify
+#     it under the terms of the GNU General Public License as published by
+#     the Free Software Foundation, either version 3 of the License, or
+#     (at your option) any later version.
+#
+#     This program is distributed in the hope that it will be useful,
+#     but WITHOUT ANY WARRANTY; without even the implied warranty of
+#     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#     GNU General Public License for more details.
+#
+#     You should have received a copy of the GNU General Public License
+#     along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+import bpy
+from bpy.props import EnumProperty, BoolProperty
+from bpy.types import (
+    Armature,
+    ArmatureModifier,
+    Context,
+    Depsgraph,
+    Mesh,
+    Object,
+    Operator,
+)
+
+from collections.abc import Iterable
+from typing import cast, TypeVar
+
+import numpy as np
+
+
+# Utilities
+
+
+T = TypeVar("T", bound=Operator)
+
+
+def set_operator_description_from_doc(cls: type[T]) -> type[T]:
+    """
+    Clean up an Operator's .__doc__ for use as bl_description.
+    :param cls: Operator subclass.
+    :return: The Operator subclass argument.
+    """
+    doc = cls.__doc__
+    if not doc or getattr(cls, "bl_description", None) is not None:
+        # There is nothing to do if there is no `__doc__` or if `bl_description` has been set manually.
+        return cls
+    # Strip the entire string first to remove leading/trailing newlines and other whitespace.
+    doc = doc.strip()
+    if doc[-1] == ".":
+        # Remove any trailing "." because Blender adds one automatically.
+        doc = doc[:-1]
+    # Remove leading/trailing whitespace from each line.
+    cls.bl_description = "\n".join(line.strip() for line in doc.splitlines())
+    return cls
+
+
+def is_mesh_object_rigged_to_armature_object(armature_object: Object,
+                                             armature_deform_bone_names: set[str],
+                                             mesh_object: Object,
+                                             ignore_disabled_modifiers: bool):
+    """
+    Determine if a mesh Object is rigged to an armature Object.
+    :param armature_object:
+    :param armature_deform_bone_names:
+    :param mesh_object:
+    :param ignore_disabled_modifiers:
+    :return:
+    """
+    for mod in mesh_object.modifiers:
+        if mod.type != 'ARMATURE':
+            continue
+
+        if ignore_disabled_modifiers and not mod.show_viewport:
+            continue
+
+        armature_mod = cast(ArmatureModifier, mod)
+
+        if not armature_mod.use_vertex_groups or armature_mod.object != armature_object:
+            continue
+
+        for vertex_group in mesh_object.vertex_groups:
+            if vertex_group.name in armature_deform_bone_names:
+                return True
+
+    return False
+
+
+def get_objects_rigged_to_armature(armature_object: Object,
+                                   objects_subset: Iterable[Object],
+                                   ignore_disabled_modifiers: bool):
+    assert armature_object.type == 'ARMATURE'
+    armature_data = cast(Armature, armature_object.data)
+    deform_bone_names = {bone.name for bone in armature_data.bones if bone.use_deform}
+
+    rigged_objects = []
+    for obj in objects_subset:
+        if obj.type != 'MESH':
+            continue
+        if is_mesh_object_rigged_to_armature_object(armature_object, deform_bone_names, obj, ignore_disabled_modifiers):
+            rigged_objects.append(obj)
+
+    return rigged_objects
+
+
+# Blender Classes
+
+
+@set_operator_description_from_doc
+class ApplyPoseAsRestPosePlus(Operator):
+    """
+    Apply the current pose as the new rest pose *and* apply the pose to meshes rigged to the armature.
+    """
+    bl_idname = "mysteryem.apply_pose_as_rest_pose_plus"
+    bl_label = "Apply Pose as Rest Pose Plus"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    preserve_volume: EnumProperty(
+        items=[
+            ('MODIFIER', "Use Modifier Settings", "Use the Preserve Volume setting of each Armature modifier when"
+                                                  " applying"),
+            ('ENABLED', "Enabled", "Enable Preserve Volume when applying"),
+            ('DISABLED', "Disabled", "Disable Preserve Volume when applying"),
+        ],
+        name="Preserve Volume",
+        description="Use the Preserve Volume setting when applying the pose to meshes",
+        default='MODIFIER',
+    )
+
+    mesh_objects_subset: EnumProperty(
+        items=[
+            ('VIEW_LAYER', "View Layer", "Mesh objects in the current view layer"),
+            ('SCENE', "Scene", "Mesh objects in the current scene"),
+            ('ALL', "All", "All mesh objects"),
+            ('CATS', "Cats (View Layer and parented)", "Mesh objects in the current view layer that are parented to the"
+                                                       " armature or one of its children. This almost exactly matches"
+                                                       " the behaviour of Cats's \"Apply as Rest Pose\""),
+        ],
+        name="Meshes Subset",
+        description="The subset of mesh objects, that are rigged to the armature, to apply the pose to",
+        default='VIEW_LAYER',
+    )
+
+    ignore_disabled_modifiers: BoolProperty(
+        name="Ignore disabled modifiers",
+        description="Ignore disabled armature modifiers when checking if a mesh is rigged to the armature",
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        pose_object = context.pose_object
+        if not pose_object or not pose_object.mode == 'POSE' or not pose_object.type == 'ARMATURE':
+            cls.poll_message_set("An armature in pose mode is required.")
+            return False
+        return True
+
+    def validate_objects(self, objects: Iterable[Object]):
+        # TODO: Include the name of the Object and Mesh that failed validation in the error message (and give hints on how
+        #  to resolve?)
+        for obj in objects:
+            if obj.data.users > 1:
+                # When the mesh has no shape keys, modifiers are applied, which cannot be applied to multi-user meshes.
+                # When the mesh has shape keys, the shape keys are adjusted manually, but if there are two mesh Objects with
+                # the same data that are rigged to the armature, then the shape keys would be adjusted twice, almost
+                # assuredly ending with incorrect results.
+                self.report({'ERROR'}, "Cannot be applied to multi-user meshes.")
+                return False
+            if obj.library is not None:
+                self.report({'ERROR'}, "Cannot be applied to meshes linked from a library.")
+                return False
+            if obj.mode == 'EDIT':
+                self.report({'ERROR'}, "Cannot be applied to meshes that are in Edit mode.")
+                return False
+        return True
+
+    def execute(self, context: Context) -> set[str]:
+        # `poll` guarantees it exists and is an armature Object.
+        armature_obj = context.pose_object
+
+        match self.mesh_objects_subset:
+            case 'VIEW_LAYER':
+                objects = context.view_layer.objects
+            case 'SCENE':
+                objects = context.scene.objects
+            case 'ALL':
+                objects = bpy.data.objects
+            case 'CATS':
+                objects = set(context.view_layer.objects)
+                objects.intersection_update(armature_obj.children_recursive)
+            case _:
+                self.report({'ERROR'}, "Unexpected subset '%s'" % self.mesh_objects_subset)
+                return {'CANCELLED'}
+
+        match self.preserve_volume:
+            case 'ENABLED':
+                preserve_volume_override = True
+            case 'DISABLED':
+                preserve_volume_override = False
+            case 'MODIFIER':
+                preserve_volume_override = None
+            case _:
+                self.report({'ERROR'}, "Unexpected Preserve Volume setting '%s'" % self.preserve_volume)
+                return {'CANCELLED'}
+
+        rigged_mesh_objects = get_objects_rigged_to_armature(armature_obj, objects, self.ignore_disabled_modifiers)
+
+        # Ensure that the Operator can be applied to all the Objects.
+        if not self.validate_objects(rigged_mesh_objects):
+            return {'CANCELLED'}
+
+        for mesh_obj in rigged_mesh_objects:
+            mesh = cast(Mesh, mesh_obj.data)
+            if mesh.shape_keys and mesh.shape_keys.key_blocks:
+                # The mesh has shape keys
+                shape_keys = mesh.shape_keys
+                key_blocks = shape_keys.key_blocks
+                if len(key_blocks) == 1:
+                    # The mesh only has a basis shape key, so it can be removed it and added back afterward.
+                    # Get Reference Key
+                    reference_shape_key = key_blocks[0]
+                    # Save the name of the Reference Key
+                    original_basis_name = reference_shape_key.name
+                    # Remove the basis shape key so there are now no shape keys
+                    mesh_obj.shape_key_remove(reference_shape_key)
+                    # Apply the pose to the mesh
+                    apply_armature_to_mesh_with_no_shape_keys(context, armature_obj, mesh_obj, preserve_volume_override)
+                    # Add the basis shape key back with the same name as before
+                    mesh_obj.shape_key_add(name=original_basis_name)
+                else:
+                    # Apply the pose to the mesh, taking into account the shape keys
+                    apply_armature_to_mesh_with_shape_keys(armature_obj, mesh_obj, preserve_volume_override)
+            else:
+                # The mesh doesn't have shape keys, so we can easily apply the pose to the mesh
+                apply_armature_to_mesh_with_no_shape_keys(context, armature_obj, mesh_obj, preserve_volume_override)
+        # Once the mesh and shape keys (if any) have been applied, the last step is to apply the current pose of the
+        # bones as the new rest pose.
+        #
+        # From the poll function, armature_obj must be in pose mode and be the `.pose_object`, but maybe it's possible
+        # it might not be the active object. We can use an operator override to tell the operator to treat armature_obj
+        # as if it's the active object even if it's not, skipping the need to actually set armature_obj as the active
+        # object.
+        with context.temp_override(active_object=armature_obj):
+            bpy.ops.pose.armature_apply()
+
+        self.report({'INFO'}, "Pose successfully applied as rest pose.")
+        return {'FINISHED'}
+
+
+# Implementation
+
+
+def apply_armature_to_mesh_with_no_shape_keys(context: Context,
+                                              armature_obj: Object,
+                                              mesh_obj: Object,
+                                              preserve_volume_override: bool | None):
+    armature_mod = cast(ArmatureModifier, mesh_obj.modifiers.new("PoseToRest", 'ARMATURE'))
+    armature_mod.object = armature_obj
+    if preserve_volume_override is not None:
+        armature_mod.use_deform_preserve_volume = preserve_volume_override
+    # In the unlikely case that there was already a modifier with the same name as the new modifier, the new
+    # modifier will have ended up with a different name
+    mod_name = armature_mod.name
+    # Context override to let us run the modifier operators on mesh_obj, even if it's not the active object.
+    # Moving the modifier to the first index will prevent an Info message about the applied modifier not being
+    # first and potentially having unexpected results.
+    with context.temp_override(object=mesh_obj):
+        if bpy.app.version >= (3, 5):
+            # Blender 3.5 adds a nice method for reordering modifiers.
+            mesh_obj.modifiers.move(mesh_obj.modifiers.find(mod_name), 0)
+        else:
+            bpy.ops.object.modifier_move_to_index(modifier=mod_name, index=0)
+        bpy.ops.object.modifier_apply(modifier=mod_name)
+
+
+def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
+                                           mesh_obj: Object,
+                                           preserve_volume_override: bool | None):
+    # The active shape key will be changed, so save the current active index, so it can be restored afterwards
+    old_active_shape_key_index = mesh_obj.active_shape_key_index
+
+    # Shape key pinning shows the active shape key in the viewport without blending; effectively what you see when
+    # in edit mode. Combined with an armature modifier, we can use this to figure out the correct positions for all
+    # the shape keys.
+    # Save the current value, so it can be restored afterwards.
+    old_show_only_shape_key = mesh_obj.show_only_shape_key
+    mesh_obj.show_only_shape_key = True
+
+    # TODO: Use try-finally to ensure original settings are always restored
+
+    # Temporarily remove vertex_groups from and disable mutes on shape keys because they affect pinned shape keys
+    me = mesh_obj.data
+    shape_key_vertex_groups = []
+    shape_key_mutes = []
+    key_blocks = me.shape_keys.key_blocks
+    for shape_key in key_blocks:
+        shape_key_vertex_groups.append(shape_key.vertex_group)
+        shape_key.vertex_group = ''
+        shape_key_mutes.append(shape_key.mute)
+        shape_key.mute = False
+
+    # TODO: Instead of disabling modifiers, add a new object the the scene collection that uses the same Mesh as
+    #  mesh_obj. And then add the modifier to that. Once done, the newly created Object can be deleted.
+    # Temporarily disable all modifiers from showing in the viewport so that they have no effect
+    mods_to_reenable_viewport = []
+    for mod in mesh_obj.modifiers:
+        if mod.show_viewport:
+            mod.show_viewport = False
+            mods_to_reenable_viewport.append(mod)
+
+    # Temporarily add a new armature modifier
+    armature_mod = cast(ArmatureModifier, mesh_obj.modifiers.new('PoseToRest', 'ARMATURE'))
+    armature_mod.object = armature_obj
+    if preserve_volume_override is not None:
+        armature_mod.use_deform_preserve_volume = preserve_volume_override
+
+    # cos are xyz positions and get flattened when using the foreach_set/foreach_get functions, so the array length
+    # will be 3 times the number of vertices
+    co_length = len(me.vertices) * 3
+    # We can re-use the same array over and over
+    eval_verts_cos_array = np.empty(co_length, dtype=np.single)
+
+    # depsgraph lets us evaluate objects and get their state after the effect of modifiers and shape keys
+    depsgraph: Depsgraph | None = None
+    evaluated_mesh_obj = None
+
+    def get_eval_cos_array():
+        nonlocal depsgraph
+        nonlocal evaluated_mesh_obj
+        # Get the depsgraph and evaluate the mesh if we haven't done so already
+        if depsgraph is None or evaluated_mesh_obj is None:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            evaluated_mesh_obj = mesh_obj.evaluated_get(depsgraph)
+        else:
+            # If we already have the depsgraph and evaluated mesh, in order for the change to the active shape
+            # key to take effect, the depsgraph has to be updated
+            depsgraph.update()
+        # Get the cos of the vertices from the evaluated mesh
+        evaluated_mesh_obj.data.vertices.foreach_get('co', eval_verts_cos_array)
+        return eval_verts_cos_array
+
+    for i, shape_key in enumerate(key_blocks):
+        # As shape key pinning is enabled, when we change the active shape key, it will change the state of the mesh
+        mesh_obj.active_shape_key_index = i
+        # The cos of the vertices of the evaluated mesh include the effect of the pinned shape key and all the
+        # modifiers (in this case, only the armature modifier we added since all the other modifiers are disabled in
+        # the viewport).
+        # This combination gives the same effect as if we'd applied the armature modifier to a mesh with the same
+        # shape as the active shape key, so we can simply set the shape key to the evaluated mesh position.
+        #
+        # Get the evaluated cos
+        evaluated_cos = get_eval_cos_array()
+        # And set the shape key to those same cos
+        shape_key.data.foreach_set('co', evaluated_cos)
+        # If it's the basis shape key, we also have to set the mesh vertices to match, otherwise the two will be
+        # desynced until Edit mode has been entered and exited, which can cause odd behaviour when creating shape
+        # keys with from_mix=False or when removing all shape keys.
+        if i == 0:
+            mesh_obj.data.vertices.foreach_set('co', evaluated_cos)
+
+    # Restore temporarily changed attributes and remove the added armature modifier
+    for mod in mods_to_reenable_viewport:
+        mod.show_viewport = True
+    mesh_obj.modifiers.remove(armature_mod)
+    for shape_key, vertex_group, mute in zip(me.shape_keys.key_blocks, shape_key_vertex_groups, shape_key_mutes):
+        shape_key.vertex_group = vertex_group
+        shape_key.mute = mute
+    mesh_obj.active_shape_key_index = old_active_shape_key_index
+    mesh_obj.show_only_shape_key = old_show_only_shape_key
+
+
+# Registration
+
+def draw_in_menu(self, context: Context):
+    self.layout.separator()
+    # CATS used the KEY_HLT icon for years, so it may be best to leave the icon as is because people are used to it.
+    self.layout.operator(ApplyPoseAsRestPosePlus.bl_idname)
+
+
+# Links for Right Click -> Online Manual.
+def add_manual_map():
+    url_manual_prefix = "https://github.com/Mysteryem/blender-apply-pose-as-rest-pose-plus"
+    url_manual_mapping = (
+        ("bpy.ops." + ApplyPoseAsRestPosePlus.bl_idname, ""),
+    )
+    return url_manual_prefix, url_manual_mapping
+
+
+def register():
+    bpy.utils.register_class(ApplyPoseAsRestPosePlus)
+    bpy.utils.register_manual_map(add_manual_map)
+    bpy.types.VIEW3D_MT_pose_apply.append(draw_in_menu)
+
+
+def unregister():
+    bpy.types.VIEW3D_MT_pose_apply.remove(draw_in_menu)
+    bpy.utils.unregister_manual_map(add_manual_map)
+    bpy.utils.unregister_class(ApplyPoseAsRestPosePlus)
+
+
+# For testing in Blender's Text Editor.
+if __name__ == "__main__":
+    # Try and unregister the previously registered version.
+    unregister_attribute = "apply_pose_as_rest_pose_plus_unregister_old"
+    temp_storage = bpy.types.WindowManager
+    if old_unregister := getattr(temp_storage, unregister_attribute, None):
+        try:
+            old_unregister()
+        except Exception as e:
+            print(e)
+    register()
+    setattr(temp_storage, unregister_attribute, unregister)
