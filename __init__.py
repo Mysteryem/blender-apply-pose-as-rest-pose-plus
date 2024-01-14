@@ -35,9 +35,11 @@ from bpy.types import (
     Mesh,
     Object,
     Operator,
+    ShapeKey,
 )
 
 from collections.abc import Iterable
+from types import SimpleNamespace
 from typing import cast, TypeVar
 
 import numpy as np
@@ -115,6 +117,119 @@ def get_objects_rigged_to_armature(armature_object: Object,
             rigged_objects.append(obj)
 
     return rigged_objects
+
+
+def _shape_key_co_memory_as_ndarray(shape_key: ShapeKey, do_check: bool = True):
+    """
+    ShapeKey.data elements have a dynamic typing based on the Object the shape keys are attached to, which makes them
+    slower to access with foreach_get. For 'MESH' type Objects, the elements are always ShapeKeyPoint type and their
+    data is stored contiguously, meaning an array can be constructed from the pointer to the first ShapeKeyPoint
+    element.
+
+    Creating an array from a pointer is inherently unsafe, so this function does a number of checks to make it safer.
+    """
+    if do_check and not _fast_mesh_shape_key_co_check():
+        return None
+    shape_data = shape_key.data
+    num_co = len(shape_data)
+
+    if num_co < 2:
+        # At least 2 elements are required to check memory size.
+        return None
+
+    co_dtype = np.dtype(np.single)
+
+    start_address = shape_data[0].as_pointer()
+    last_element_start_address = shape_data[-1].as_pointer()
+
+    memory_length_minus_one_item = last_element_start_address - start_address
+
+    expected_element_size = co_dtype.itemsize * 3
+    expected_memory_length = (num_co - 1) * expected_element_size
+
+    if memory_length_minus_one_item == expected_memory_length:
+        # Use NumPy's array interface protocol to construct an array from the pointer.
+        array_interface_holder = SimpleNamespace(
+            __array_interface__=dict(
+                shape=(num_co * 3,),
+                typestr=co_dtype.str,
+                data=(start_address, False),  # False for writable
+                version=3,
+            )
+        )
+        return np.asarray(array_interface_holder)
+    else:
+        return None
+
+
+# Initially set to None
+_USE_FAST_SHAPE_KEY_CO_FOREACH_GETSET = None
+
+
+def _fast_mesh_shape_key_co_check():
+    global _USE_FAST_SHAPE_KEY_CO_FOREACH_GETSET
+    if _USE_FAST_SHAPE_KEY_CO_FOREACH_GETSET is not None:
+        # The check has already been run and the result has been stored in _USE_FAST_SHAPE_KEY_CO_FOREACH_GETSET.
+        return _USE_FAST_SHAPE_KEY_CO_FOREACH_GETSET
+
+    tmp_mesh = None
+    tmp_object = None
+    try:
+        tmp_mesh = bpy.data.meshes.new("")
+        num_co = 100
+        tmp_mesh.vertices.add(num_co)
+        # An Object is needed to add/remove shape keys from a Mesh.
+        tmp_object = bpy.data.objects.new("", tmp_mesh)
+        shape_key = tmp_object.shape_key_add(name="")
+        shape_data = shape_key.data
+
+        if shape_key.bl_rna.properties["data"].fixed_type == shape_data[0].bl_rna:
+            # The shape key "data" collection is no longer dynamically typed and foreach_get/set should be fast enough.
+            _USE_FAST_SHAPE_KEY_CO_FOREACH_GETSET = False
+            return False
+
+        co_dtype = np.dtype(np.single)
+
+        # Fill the shape key with some data.
+        shape_data.foreach_set("co", np.arange(3 * num_co, dtype=co_dtype))
+
+        # The check is this function, so explicitly don't do the check.
+        co_memory_as_array = _shape_key_co_memory_as_ndarray(shape_key, do_check=False)
+        if co_memory_as_array is not None:
+            # Immediately make a copy in case the `foreach_get` afterward can cause the memory to be reallocated.
+            co_array_from_memory = co_memory_as_array.copy()
+            del co_memory_as_array
+            # Check that the array created from the pointer has the exact same contents
+            # as using foreach_get.
+            co_array_check = np.empty(num_co * 3, dtype=co_dtype)
+            shape_data.foreach_get("co", co_array_check)
+            if np.array_equal(co_array_check, co_array_from_memory, equal_nan=True):
+                _USE_FAST_SHAPE_KEY_CO_FOREACH_GETSET = True
+                return True
+
+        # Something didn't work.
+        print("Fast shape key co access failed. Access will fall back to regular foreach_get/set.")
+        _USE_FAST_SHAPE_KEY_CO_FOREACH_GETSET = False
+        return False
+    finally:
+        # Clean up temporary objects.
+        if tmp_object is not None:
+            tmp_object.shape_key_clear()
+            bpy.data.objects.remove(tmp_object)
+        if tmp_mesh is not None:
+            bpy.data.meshes.remove(tmp_mesh)
+
+
+def fast_mesh_shape_key_co_foreach_set(shape_key: ShapeKey, arr: np.ndarray):
+    co_memory_as_array = _shape_key_co_memory_as_ndarray(shape_key)
+    if co_memory_as_array is not None:
+        co_memory_as_array[:] = arr
+        # Unsure if this is required. I don't think `.update()` actually does anything, nor do I think #foreach_set
+        # calls any function equivalent to `.update()` either.
+        # Memory has been set directly, so call `.update()`.
+        shape_key.data.update()
+    else:
+        shape_key.data.foreach_set("co", arr)
 
 
 # Blender Classes
@@ -365,7 +480,7 @@ def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
         # Get the evaluated cos
         evaluated_cos = get_eval_cos_array()
         # And set the shape key to those same cos
-        shape_key.data.foreach_set('co', evaluated_cos)
+        fast_mesh_shape_key_co_foreach_set(shape_key, evaluated_cos)
         # If it's the basis shape key, we also have to set the mesh vertices to match, otherwise the two will be
         # desynced until Edit mode has been entered and exited, which can cause odd behaviour when creating shape
         # keys with from_mix=False or when removing all shape keys.
