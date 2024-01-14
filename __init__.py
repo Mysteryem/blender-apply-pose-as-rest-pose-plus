@@ -453,6 +453,8 @@ def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
     depsgraph: Depsgraph | None = None
     evaluated_mesh_obj = None
 
+    has_position_attribute = bpy.app.version >= (3, 5)
+
     def get_eval_cos_array():
         nonlocal depsgraph
         nonlocal evaluated_mesh_obj
@@ -465,7 +467,15 @@ def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
             # key to take effect, the depsgraph has to be updated
             depsgraph.update()
         # Get the cos of the vertices from the evaluated mesh
-        evaluated_mesh_obj.data.vertices.foreach_get('co', eval_verts_cos_array)
+        evaluated_mesh = cast(Mesh, evaluated_mesh_obj.data)
+        if has_position_attribute:
+            position_attribute = evaluated_mesh.attributes.get("position")
+            if (position_attribute
+                    and position_attribute.data_type == 'FLOAT_VECTOR'
+                    and position_attribute.domain == 'POINT'):
+                position_attribute.data.foreach_get("vector", eval_verts_cos_array)
+        else:
+            evaluated_mesh.vertices.foreach_get("co", eval_verts_cos_array)
         return eval_verts_cos_array
 
     for i, shape_key in enumerate(key_blocks):
@@ -485,7 +495,15 @@ def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
         # desynced until Edit mode has been entered and exited, which can cause odd behaviour when creating shape
         # keys with from_mix=False or when removing all shape keys.
         if i == 0:
-            mesh_obj.data.vertices.foreach_set('co', evaluated_cos)
+            mesh_data = cast(Mesh, mesh_obj.data)
+            if has_position_attribute:
+                position_attribute = mesh_data.attributes.get("position")
+                if (position_attribute
+                        and position_attribute.data_type == 'FLOAT_VECTOR'
+                        and position_attribute.domain == 'POINT'):
+                    position_attribute.data.foreach_set("vector", evaluated_cos)
+            else:
+                mesh_data.vertices.foreach_set("co", evaluated_cos)
 
     # Restore temporarily changed attributes and remove the added armature modifier
     for mod in mods_to_reenable_viewport:
