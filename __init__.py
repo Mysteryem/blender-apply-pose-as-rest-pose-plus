@@ -347,6 +347,17 @@ class ApplyPoseAsRestPosePlus(Operator):
         default=False,
     )
 
+    performance_mode: EnumProperty(
+        items=[
+            ('FAST', "Fast", "Only the vertices of the Basis that end up in a new position from the pose are checked."
+                             " This can skip vertices that are moved by multiple bones but end up in the same place"),
+            ('EXACT', "Exact", "All vertices that are rigged to the armature are checked"),
+            ('DEBUG', "Debug", "Assumes all vertices are affected by the new pose"),
+        ],
+        name="Mode",
+        default='FAST',
+    )
+
     @classmethod
     def poll(cls, context):
         pose_object = context.pose_object
@@ -411,37 +422,44 @@ class ApplyPoseAsRestPosePlus(Operator):
 
         posed_deform_bone_names = get_posed_deform_bone_names(armature_obj.pose)
 
-        mesh_processing_start = perf_counter()
-        for mesh_obj in rigged_mesh_objects:
-            mesh = cast(Mesh, mesh_obj.data)
-            if mesh.shape_keys and mesh.shape_keys.key_blocks:
-                # The mesh has shape keys
-                shape_keys = mesh.shape_keys
-                key_blocks = shape_keys.key_blocks
-                if len(key_blocks) == 1:
-                    # The mesh only has a basis shape key, so it can be removed it and added back afterward.
-                    # Get Reference Key
-                    reference_shape_key = key_blocks[0]
-                    # Save the name of the Reference Key
-                    original_basis_name = reference_shape_key.name
-                    # Remove the basis shape key so there are now no shape keys
-                    mesh_obj.shape_key_remove(reference_shape_key)
-                    # Apply the pose to the mesh
-                    apply_armature_to_mesh_with_no_shape_keys(context, armature_obj, mesh_obj, preserve_volume_override)
-                    # Add the basis shape key back with the same name as before
-                    mesh_obj.shape_key_add(name=original_basis_name)
+        if len(posed_deform_bone_names) != 0:
+            mesh_processing_start = perf_counter()
+            for mesh_obj in rigged_mesh_objects:
+                mesh = cast(Mesh, mesh_obj.data)
+                if mesh.shape_keys and mesh.shape_keys.key_blocks:
+                    # The mesh has shape keys
+                    shape_keys = mesh.shape_keys
+                    key_blocks = shape_keys.key_blocks
+                    if len(key_blocks) == 1:
+                        # The mesh only has a basis shape key, so it can be removed it and added back afterward.
+                        # Get Reference Key
+                        reference_shape_key = key_blocks[0]
+                        # Save the name of the Reference Key
+                        original_basis_name = reference_shape_key.name
+                        # Remove the basis shape key so there are now no shape keys
+                        mesh_obj.shape_key_remove(reference_shape_key)
+                        # Apply the pose to the mesh
+                        apply_armature_to_mesh_with_no_shape_keys(context,
+                                                                  armature_obj,
+                                                                  mesh_obj,
+                                                                  preserve_volume_override)
+                        # Add the basis shape key back with the same name as before
+                        mesh_obj.shape_key_add(name=original_basis_name)
+                    else:
+                        # Apply the pose to the mesh, taking into account the shape keys
+                        apply_armature_to_mesh_with_shape_keys(armature_obj,
+                                                               mesh_obj,
+                                                               posed_deform_bone_names,
+                                                               preserve_volume_override,
+                                                               self.performance_mode)
                 else:
-                    # Apply the pose to the mesh, taking into account the shape keys
-                    apply_armature_to_mesh_with_shape_keys(armature_obj,
-                                                           mesh_obj,
-                                                           posed_deform_bone_names,
-                                                           preserve_volume_override)
-            else:
-                # The mesh doesn't have shape keys, so we can easily apply the pose to the mesh
-                apply_armature_to_mesh_with_no_shape_keys(context, armature_obj, mesh_obj, preserve_volume_override)
+                    # The mesh doesn't have shape keys, so we can easily apply the pose to the mesh
+                    apply_armature_to_mesh_with_no_shape_keys(context, armature_obj, mesh_obj, preserve_volume_override)
 
-        mesh_processing_end = perf_counter()
-        print(f"Mesh processing took {(mesh_processing_end - mesh_processing_start) * 1000:f}ms")
+            mesh_processing_end = perf_counter()
+            print(f"Mesh processing took {(mesh_processing_end - mesh_processing_start) * 1000:f}ms")
+        else:
+            print("No deform bones (or their recursive parents) were posed")
 
         # Once the mesh and shape keys (if any) have been applied, the last step is to apply the current pose of the
         # bones as the new rest pose.
@@ -485,16 +503,24 @@ def apply_armature_to_mesh_with_no_shape_keys(context: Context,
 
 # TODO: If the pose is entirely translation, the effect on every shape key will be the same, but work is done on every
 #  shape key.
-# TODO: Fast mode that skips finding affected rigged vertices and instead only affects vertices moved on the 'Basis'.
 def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
                                            mesh_obj: Object,
                                            posed_deform_bone_names: Iterable[str],
-                                           preserve_volume_override: bool | None):
-    affected_rigged_vertex_indices = get_rigged_vertex_indices(mesh_obj, posed_deform_bone_names)
-    if not len(affected_rigged_vertex_indices):
-        # No vertices are affected by the new pose, so there is nothing to do.
-        print(f"Skipped '{mesh_obj.name}' because it is not affected by the new pose")
-        return
+                                           preserve_volume_override: bool | None,
+                                           performance_mode: str):
+    me = cast(Mesh, mesh_obj.data)
+
+    if performance_mode == 'EXACT':
+        affected_rigged_vertex_indices = get_rigged_vertex_indices(mesh_obj, posed_deform_bone_names)
+        if len(affected_rigged_vertex_indices) == 0:
+            # No vertices are affected by the new pose, so there is nothing to do.
+            print(f"Skipped '{mesh_obj.name}' because it is not affected by the new pose")
+            return
+        all_vertices_affected = len(me.vertices) == len(affected_rigged_vertex_indices)
+    else:
+        # 'FAST' mode will change these, otherwise it is assumed that all vertices are affected by the new pose.
+        affected_rigged_vertex_indices = None
+        all_vertices_affected = True
 
     # The active shape key will be changed, so save the current active index, so it can be restored afterwards
     old_active_shape_key_index = mesh_obj.active_shape_key_index
@@ -509,7 +535,6 @@ def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
     # TODO: Use try-finally to ensure original settings are always restored
 
     # Temporarily remove vertex_groups from and disable mutes on shape keys because they affect pinned shape keys
-    me = cast(Mesh, mesh_obj.data)
     shape_key_vertex_groups = []
     shape_key_mutes = []
     key_blocks = me.shape_keys.key_blocks
@@ -574,8 +599,6 @@ def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
     # Default is 1e-08, but Blender shape key coordinates and mesh positions are single-precision float
     atol = 1e-06
 
-    all_vertices_affected = len(me.vertices) == len(affected_rigged_vertex_indices)
-
     print(f"Processing '{mesh_obj.name}'")
 
     skip_key_blocks = set()
@@ -596,9 +619,31 @@ def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
         if i == 0:
             # Find which shape keys are affected the same as the reference key and can therefore
             original_reference_key_cos = np.empty_like(evaluated_cos)
+            original_reference_key_cos_vector_view = original_reference_key_cos.view()
+            original_reference_key_cos_vector_view.shape = (-1, 3)
             fast_mesh_shape_key_co_foreach_get(shape_key, original_reference_key_cos)
             evaluated_cos_vector_view = evaluated_cos.view()
             evaluated_cos_vector_view.shape = (-1, 3)
+            if performance_mode == 'FAST':
+                # Assume the affected vertices in the reference key are the only affected vertices of all other shape
+                # keys too. This will almost always be the case unless multiple bones move a vertex, but their combined
+                # effect cancels out. If some of those bones were rotated or scaled, then in other shape keys, the
+                # combined effect might not cancel out.
+                unaffected_by_pose_mask = np.isclose(evaluated_cos_vector_view,
+                                                     original_reference_key_cos_vector_view,
+                                                     rtol=rtol,
+                                                     atol=atol,
+                                                     equal_nan=True)
+                unaffected_by_pose_vector_mask = np.all(unaffected_by_pose_mask, axis=1)
+                # Invert in-place.
+                affected_by_pose_vector_mask = np.logical_not(unaffected_by_pose_vector_mask,
+                                                              out=unaffected_by_pose_vector_mask)
+                affected_rigged_vertex_indices = np.flatnonzero(affected_by_pose_vector_mask)
+                if len(affected_rigged_vertex_indices) == 0:
+                    # No vertices are affected by the new pose, so there is nothing to do.
+                    print(f"Skipped '{mesh_obj.name}' because it is not affected by the new pose")
+                    break
+                all_vertices_affected = len(affected_rigged_vertex_indices) == len(me.vertices)
             if all_vertices_affected:
                 # If the root bone, e.g. hips, is transformed, all vertices will be affected.
                 affected_vertices_evaluated_vectors = evaluated_cos_vector_view
