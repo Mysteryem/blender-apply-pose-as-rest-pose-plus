@@ -283,24 +283,33 @@ def _fast_mesh_shape_key_co_check():
             bpy.data.meshes.remove(tmp_mesh)
 
 
-def fast_mesh_shape_key_co_foreach_get(shape_key: ShapeKey, arr: np.ndarray):
-    co_memory_as_array = _shape_key_co_memory_as_ndarray(shape_key)
-    if co_memory_as_array is not None:
-        arr[:] = co_memory_as_array
-    else:
-        shape_key.data.foreach_get("co", arr)
+# ShapeKey.points was added in Blender 4.1.0.
+_HAS_SHAPE_KEY_POINTS = "points" in bpy.types.ShapeKey.bl_rna.properties and bpy.app.version >= (4, 1, 0)
 
+if _HAS_SHAPE_KEY_POINTS:
+    def fast_mesh_shape_key_co_foreach_get(shape_key: ShapeKey, arr: np.ndarray):
+        shape_key.points.foreach_get("co", arr)
 
-def fast_mesh_shape_key_co_foreach_set(shape_key: ShapeKey, arr: np.ndarray):
-    co_memory_as_array = _shape_key_co_memory_as_ndarray(shape_key)
-    if co_memory_as_array is not None:
-        co_memory_as_array[:] = arr
-        # Unsure if this is required. I don't think `.update()` actually does anything, nor do I think #foreach_set
-        # calls any function equivalent to `.update()` either.
-        # Memory has been set directly, so call `.update()`.
-        shape_key.data.update()
-    else:
-        shape_key.data.foreach_set("co", arr)
+    def fast_mesh_shape_key_co_foreach_set(shape_key: ShapeKey, arr: np.ndarray):
+        shape_key.points.foreach_set("co", arr)
+else:
+    def fast_mesh_shape_key_co_foreach_get(shape_key: ShapeKey, arr: np.ndarray):
+        co_memory_as_array = _shape_key_co_memory_as_ndarray(shape_key)
+        if co_memory_as_array is not None:
+            arr[:] = co_memory_as_array
+        else:
+            shape_key.data.foreach_get("co", arr)
+
+    def fast_mesh_shape_key_co_foreach_set(shape_key: ShapeKey, arr: np.ndarray):
+        co_memory_as_array = _shape_key_co_memory_as_ndarray(shape_key)
+        if co_memory_as_array is not None:
+            co_memory_as_array[:] = arr
+            # Unsure if this is required. I don't think `.update()` actually does anything, nor do I think #foreach_set
+            # calls any function equivalent to `.update()` either.
+            # Memory has been set directly, so call `.update()`.
+            shape_key.data.update()
+        else:
+            shape_key.data.foreach_set("co", arr)
 
 
 # Blender Classes
