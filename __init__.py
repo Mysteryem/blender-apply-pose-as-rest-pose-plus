@@ -139,7 +139,7 @@ def get_directly_posed_bone_names(armature_pose: Pose):
     posed_bone_indices = np.flatnonzero(~np.all(is_close_to_identity, axis=(1, 2))).data
 
     if len(posed_bone_indices) != 0:
-        is_close_no_translation = is_close_to_identity[:, :, :3]
+        is_close_no_translation = is_close_to_identity[:, :3]
         # The last value in the last row/column is most likely always going to be 1, but check it too.
         is_close_last_value = is_close_to_identity.ravel()[15::16]
         if np.all(is_close_no_translation) and np.all(is_close_last_value):
