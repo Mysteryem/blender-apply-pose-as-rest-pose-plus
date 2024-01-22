@@ -531,7 +531,25 @@ def _apply_armature_modifier_to_mesh(context: Context,
         else:
             bpy.ops.object.modifier_move_to_index(modifier=mod_name, index=0)
         if as_shape_key:
-            bpy.ops.object.modifier_apply_as_shapekey(modifier=mod_name)
+            # Since Blender 3.0, the effect of shape keys are included in the saved shape key...
+            # https://projects.blender.org/blender/blender/issues/91923
+            mesh = cast(Mesh, mesh_obj.data)
+            shape_keys = mesh.shape_keys
+            if shape_keys:
+                orig_active_shape_index = mesh_obj.active_shape_key_index
+                orig_show_only_shape = mesh_obj.show_only_shape_key
+                orig_reference_key_mute = shape_keys.reference_key.mute
+                try:
+                    mesh_obj.active_shape_key_index = 0
+                    mesh_obj.show_only_shape_key = True
+                    shape_keys.reference_key.mute = False
+                    bpy.ops.object.modifier_apply_as_shapekey(modifier=mod_name)
+                finally:
+                    mesh_obj.active_shape_key_index = orig_active_shape_index
+                    mesh_obj.show_only_shape_key = orig_show_only_shape
+                    shape_keys.reference_key.mute = orig_reference_key_mute
+            else:
+                bpy.ops.object.modifier_apply_as_shapekey(modifier=mod_name)
         else:
             bpy.ops.object.modifier_apply(modifier=mod_name)
 
