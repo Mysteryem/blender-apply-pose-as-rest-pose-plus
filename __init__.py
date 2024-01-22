@@ -571,15 +571,30 @@ def apply_armature_to_mesh_with_shape_keys_translation_only(context: Context,
         shape_key_cos = new_key_relative_cos
         # Array to store updated shape keys in, to avoid allocating a new array each time.
         shape_key_cos_updated = np.empty_like(shape_key_cos)
+        reference_key = key_blocks.reference_key
         # Apply the newly added shape key to every other shape key.
         for shape_key in key_blocks[:-1]:
+            # Get the new coordinates for the shape key.
             if shape_key == new_shape_key_relative:
                 # The result of applying the new shape key to its relative key is simply itself.
-                fast_mesh_shape_key_co_foreach_set(shape_key, new_key_cos)
+                updated_shape_key_cos = new_key_cos
             else:
                 fast_mesh_shape_key_co_foreach_get(shape_key, shape_key_cos)
-                np.add(shape_key_cos, difference, out=shape_key_cos_updated)
-                fast_mesh_shape_key_co_foreach_set(shape_key, shape_key_cos_updated)
+                updated_shape_key_cos = np.add(shape_key_cos, difference, out=shape_key_cos_updated)
+
+            # Update the shape key.
+            fast_mesh_shape_key_co_foreach_set(shape_key, updated_shape_key_cos)
+
+            if shape_key == reference_key:
+                # Mesh positions must also be updated to match the reference shape key.
+                if bpy.app.version >= (3, 5):
+                    position_attribute = mesh.attributes.get("position")
+                    if (position_attribute
+                            and position_attribute.data_type == 'FLOAT_VECTOR'
+                            and position_attribute.domain == 'POINT'):
+                        position_attribute.data.foreach_get("vector", updated_shape_key_cos)
+                else:
+                    mesh.vertices.foreach_get("co", updated_shape_key_cos)
     # Remove the newly added shape key.
     mesh_obj.shape_key_remove(new_shape_key)
 
