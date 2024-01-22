@@ -189,7 +189,7 @@ def get_rigged_vertex_indices(mesh_object: Object, bone_names: Iterable[str]):
     def rigged_vertex_index_gen():
         for i, v in enumerate(mesh.vertices):
             for g in v.groups:
-                if g.group in vertex_group_indices:
+                if g.weight != 0 and g.group in vertex_group_indices:
                     yield i
                     break
 
