@@ -570,7 +570,8 @@ def apply_armature_to_mesh_with_shape_keys_translation_only(context: Context,
     _apply_armature_modifier_to_mesh(context, armature_obj, mesh_obj, preserve_volume_override, True)
     # The newly added shape key will be at the bottom.
     mesh = cast(Mesh, mesh_obj.data)
-    key_blocks = mesh.shape_keys.key_blocks
+    shape_keys = mesh.shape_keys
+    key_blocks = shape_keys.key_blocks
     new_shape_key = key_blocks[-1]
     new_shape_key_relative = new_shape_key.relative_key
     num_co = len(mesh.vertices) * 3
@@ -589,7 +590,7 @@ def apply_armature_to_mesh_with_shape_keys_translation_only(context: Context,
         shape_key_cos = new_key_relative_cos
         # Array to store updated shape keys in, to avoid allocating a new array each time.
         shape_key_cos_updated = np.empty_like(shape_key_cos)
-        reference_key = key_blocks.reference_key
+        reference_key = shape_keys.reference_key
         # Apply the newly added shape key to every other shape key.
         for shape_key in key_blocks[:-1]:
             # Get the new coordinates for the shape key.
