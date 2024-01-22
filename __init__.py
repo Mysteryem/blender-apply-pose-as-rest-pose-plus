@@ -131,11 +131,25 @@ def get_directly_posed_bone_names(armature_pose: Pose):
     basis_matrices = np.empty((len(bones), 4, 4), dtype=np.single)
     basis_matrices_flat_view = basis_matrices.view()
     basis_matrices_flat_view.shape = -1
+    # Note: The individual matrices are transposed compared to how they would normally be accessed through the Python
+    # API. E.g. basis_matrices[0].T[1] is the same as bones[0].matrix_basis[1], giving the second row.
     bones.foreach_get("matrix_basis", basis_matrices_flat_view)
     is_close_to_identity = np.isclose(basis_matrices, matrix_basis_identity, rtol=1e-05, atol=1e-06)
 
     posed_bone_indices = np.flatnonzero(~np.all(is_close_to_identity, axis=(1, 2))).data
-    return {bones[i].name for i in posed_bone_indices}
+
+    if len(posed_bone_indices) != 0:
+        is_close_no_translation = is_close_to_identity[:, :, :3]
+        # The last value in the last row/column is most likely always going to be 1, but check it too.
+        is_close_last_value = is_close_to_identity.ravel()[15::16]
+        if np.all(is_close_no_translation) and np.all(is_close_last_value):
+            translation_only = True
+        else:
+            translation_only = False
+    else:
+        translation_only = True
+
+    return {bones[i].name for i in posed_bone_indices}, translation_only
 
 
 def get_posed_deform_bone_names(armature_pose: Pose):
@@ -144,7 +158,7 @@ def get_posed_deform_bone_names(armature_pose: Pose):
     :param armature_pose:
     :return:
     """
-    directly_posed_bone_names = get_directly_posed_bone_names(armature_pose)
+    directly_posed_bone_names, translation_only = get_directly_posed_bone_names(armature_pose)
 
     @cache
     def is_pose_bone_posed(pose_bone: PoseBone):
@@ -156,7 +170,7 @@ def get_posed_deform_bone_names(armature_pose: Pose):
         return parent is not None and is_pose_bone_posed(parent)
 
     return [pose_bone.name for pose_bone in armature_pose.bones
-            if pose_bone.bone.use_deform and is_pose_bone_posed(pose_bone)]
+            if pose_bone.bone.use_deform and is_pose_bone_posed(pose_bone)], translation_only
 
 
 def get_rigged_vertex_indices(mesh_object: Object, bone_names: Iterable[str]):
@@ -429,7 +443,7 @@ class ApplyPoseAsRestPosePlus(Operator):
         if not self.validate_objects(rigged_mesh_objects):
             return {'CANCELLED'}
 
-        posed_deform_bone_names = get_posed_deform_bone_names(armature_obj.pose)
+        posed_deform_bone_names, translation_only = get_posed_deform_bone_names(armature_obj.pose)
 
         if len(posed_deform_bone_names) != 0:
             mesh_processing_start = perf_counter()
@@ -456,11 +470,19 @@ class ApplyPoseAsRestPosePlus(Operator):
                         mesh_obj.shape_key_add(name=original_basis_name)
                     else:
                         # Apply the pose to the mesh, taking into account the shape keys
-                        apply_armature_to_mesh_with_shape_keys(armature_obj,
-                                                               mesh_obj,
-                                                               posed_deform_bone_names,
-                                                               preserve_volume_override,
-                                                               self.performance_mode)
+                        if translation_only:
+                            # Optimised for a new pose which only translates bones.
+                            apply_armature_to_mesh_with_shape_keys_translation_only(context,
+                                                                                    armature_obj,
+                                                                                    mesh_obj,
+                                                                                    preserve_volume_override)
+                        else:
+                            apply_armature_to_mesh_with_shape_keys(context,
+                                                                   armature_obj,
+                                                                   mesh_obj,
+                                                                   posed_deform_bone_names,
+                                                                   preserve_volume_override,
+                                                                   self.performance_mode)
                 else:
                     # The mesh doesn't have shape keys, so we can easily apply the pose to the mesh
                     apply_armature_to_mesh_with_no_shape_keys(context, armature_obj, mesh_obj, preserve_volume_override)
@@ -487,10 +509,11 @@ class ApplyPoseAsRestPosePlus(Operator):
 # Implementation
 
 
-def apply_armature_to_mesh_with_no_shape_keys(context: Context,
-                                              armature_obj: Object,
-                                              mesh_obj: Object,
-                                              preserve_volume_override: bool | None):
+def _apply_armature_modifier_to_mesh(context: Context,
+                                     armature_obj: Object,
+                                     mesh_obj: Object,
+                                     preserve_volume_override: bool | None,
+                                     as_shape_key: bool):
     armature_mod = cast(ArmatureModifier, mesh_obj.modifiers.new("PoseToRest", 'ARMATURE'))
     armature_mod.object = armature_obj
     if preserve_volume_override is not None:
@@ -507,12 +530,62 @@ def apply_armature_to_mesh_with_no_shape_keys(context: Context,
             mesh_obj.modifiers.move(mesh_obj.modifiers.find(mod_name), 0)
         else:
             bpy.ops.object.modifier_move_to_index(modifier=mod_name, index=0)
-        bpy.ops.object.modifier_apply(modifier=mod_name)
+        if as_shape_key:
+            bpy.ops.object.modifier_apply_as_shapekey(modifier=mod_name)
+        else:
+            bpy.ops.object.modifier_apply(modifier=mod_name)
 
 
-# TODO: If the pose is entirely translation, the effect on every shape key will be the same, but work is done on every
-#  shape key.
-def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
+def apply_armature_to_mesh_with_no_shape_keys(context: Context,
+                                              armature_obj: Object,
+                                              mesh_obj: Object,
+                                              preserve_volume_override: bool | None):
+    _apply_armature_modifier_to_mesh(context, armature_obj, mesh_obj, preserve_volume_override, False)
+
+
+def apply_armature_to_mesh_with_shape_keys_translation_only(context: Context,
+                                                            armature_obj: Object,
+                                                            mesh_obj: Object,
+                                                            preserve_volume_override: bool | None):
+    # When a new pose is only translation, the effect on all shape keys will be the same, so the Armature modifier can
+    # be applied as a shape key and then that shape key can be applied to all other shape keys.
+    _apply_armature_modifier_to_mesh(context, armature_obj, mesh_obj, preserve_volume_override, True)
+    # The newly added shape key will be at the bottom.
+    mesh = cast(Mesh, mesh_obj.data)
+    key_blocks = mesh.shape_keys.key_blocks
+    new_shape_key = key_blocks[-1]
+    new_shape_key_relative = new_shape_key.relative_key
+    num_co = len(mesh.vertices) * 3
+    new_key_cos = np.empty(num_co, dtype=np.single)
+    new_key_relative_cos = np.empty(num_co, dtype=np.single)
+    fast_mesh_shape_key_co_foreach_get(new_shape_key, new_key_cos)
+    fast_mesh_shape_key_co_foreach_get(new_shape_key_relative, new_key_relative_cos)
+    difference = new_key_cos - new_key_relative_cos
+    # Same as default
+    rtol = 1e-05
+    # Default is 1e-08, but Blender shape key coordinates and mesh positions are single-precision float.
+    atol = 1e-06
+    # Only if the shape key has any effect do the other shape keys need to be updated.
+    if not np.allclose(difference, 0, rtol=rtol, atol=atol, equal_nan=True):
+        # `new_key_relative_cos` isn't needed any more, so re-use it to store other shape key cos.
+        shape_key_cos = new_key_relative_cos
+        # Array to store updated shape keys in, to avoid allocating a new array each time.
+        shape_key_cos_updated = np.empty_like(shape_key_cos)
+        # Apply the newly added shape key to every other shape key.
+        for shape_key in key_blocks[:-1]:
+            if shape_key == new_shape_key_relative:
+                # The result of applying the new shape key to its relative key is simply itself.
+                fast_mesh_shape_key_co_foreach_set(shape_key, new_key_cos)
+            else:
+                fast_mesh_shape_key_co_foreach_get(shape_key, shape_key_cos)
+                np.add(shape_key_cos, difference, out=shape_key_cos_updated)
+                fast_mesh_shape_key_co_foreach_set(shape_key, shape_key_cos_updated)
+    # Remove the newly added shape key.
+    mesh_obj.shape_key_remove(new_shape_key)
+
+
+def apply_armature_to_mesh_with_shape_keys(context: Context,
+                                           armature_obj: Object,
                                            mesh_obj: Object,
                                            posed_deform_bone_names: Iterable[str],
                                            preserve_volume_override: bool | None,
@@ -585,7 +658,7 @@ def apply_armature_to_mesh_with_shape_keys(armature_obj: Object,
         nonlocal evaluated_mesh_obj
         # Get the depsgraph and evaluate the mesh if we haven't done so already
         if depsgraph is None or evaluated_mesh_obj is None:
-            depsgraph = bpy.context.evaluated_depsgraph_get()
+            depsgraph = context.evaluated_depsgraph_get()
             evaluated_mesh_obj = mesh_obj.evaluated_get(depsgraph)
         else:
             # If we already have the depsgraph and evaluated mesh, in order for the change to the active shape
