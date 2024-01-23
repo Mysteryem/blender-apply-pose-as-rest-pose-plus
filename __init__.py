@@ -48,7 +48,6 @@ from types import SimpleNamespace
 from typing import cast, TypeVar
 
 
-
 # Utilities
 
 
@@ -276,8 +275,7 @@ def _fast_mesh_shape_key_co_check():
             # Immediately make a copy in case the `foreach_get` afterward can cause the memory to be reallocated.
             co_array_from_memory = co_memory_as_array.copy()
             del co_memory_as_array
-            # Check that the array created from the pointer has the exact same contents
-            # as using foreach_get.
+            # Check that the array created from the pointer has the exact same contents as using foreach_get.
             co_array_check = np.empty(num_co * 3, dtype=co_dtype)
             shape_data.foreach_get("co", co_array_check)
             if np.array_equal(co_array_check, co_array_from_memory, equal_nan=True):
@@ -390,21 +388,19 @@ class ApplyPoseAsRestPosePlus(Operator):
         return True
 
     def validate_objects(self, objects: Iterable[Object]):
-        # TODO: Include the name of the Object and Mesh that failed validation in the error message (and give hints on how
-        #  to resolve?)
         for obj in objects:
             if obj.data.users > 1:
                 # When the mesh has no shape keys, modifiers are applied, which cannot be applied to multi-user meshes.
-                # When the mesh has shape keys, the shape keys are adjusted manually, but if there are two mesh Objects with
-                # the same data that are rigged to the armature, then the shape keys would be adjusted twice, almost
-                # assuredly ending with incorrect results.
-                self.report({'ERROR'}, "Cannot be applied to multi-user meshes.")
+                # When the mesh has shape keys, the shape keys are adjusted manually, but if there are two mesh Objects
+                # with the same data that are rigged to the armature, then the shape keys would be adjusted twice,
+                # almost assuredly ending with incorrect results.
+                self.report({'ERROR'}, f"Cannot be applied to multi-user meshes: {obj!r}")
                 return False
             if obj.library is not None:
-                self.report({'ERROR'}, "Cannot be applied to meshes linked from a library.")
+                self.report({'ERROR'}, f"Cannot be applied to meshes linked from a library: {obj!r}")
                 return False
             if obj.mode == 'EDIT':
-                self.report({'ERROR'}, "Cannot be applied to meshes that are in Edit mode.")
+                self.report({'ERROR'}, f"Cannot be applied to meshes that are in Edit mode: {obj!r}")
                 return False
         return True
 
@@ -455,21 +451,21 @@ class ApplyPoseAsRestPosePlus(Operator):
                     key_blocks = shape_keys.key_blocks
                     if len(key_blocks) == 1:
                         # The mesh only has a basis shape key, so it can be removed it and added back afterward.
-                        # Get Reference Key
+                        # Get Reference Key.
                         reference_shape_key = key_blocks[0]
-                        # Save the name of the Reference Key
+                        # Save the name of the Reference Key.
                         original_basis_name = reference_shape_key.name
-                        # Remove the basis shape key so there are now no shape keys
+                        # Remove the basis shape key so there are now no shape keys.
                         mesh_obj.shape_key_remove(reference_shape_key)
-                        # Apply the pose to the mesh
+                        # Apply the pose to the mesh.
                         apply_armature_to_mesh_with_no_shape_keys(context,
                                                                   armature_obj,
                                                                   mesh_obj,
                                                                   preserve_volume_override)
-                        # Add the basis shape key back with the same name as before
+                        # Add the basis shape key back with the same name as before.
                         mesh_obj.shape_key_add(name=original_basis_name)
                     else:
-                        # Apply the pose to the mesh, taking into account the shape keys
+                        # Apply the pose to the mesh, taking into account the shape keys.
                         if translation_only:
                             # Optimised for a new pose which only translates bones.
                             apply_armature_to_mesh_with_shape_keys_translation_only(context,
@@ -484,7 +480,7 @@ class ApplyPoseAsRestPosePlus(Operator):
                                                                    preserve_volume_override,
                                                                    self.performance_mode)
                 else:
-                    # The mesh doesn't have shape keys, so we can easily apply the pose to the mesh
+                    # The mesh doesn't have shape keys, so we can easily apply the pose to the mesh.
                     apply_armature_to_mesh_with_no_shape_keys(context, armature_obj, mesh_obj, preserve_volume_override)
 
             mesh_processing_end = perf_counter()
@@ -518,12 +514,12 @@ def _apply_armature_modifier_to_mesh(context: Context,
     armature_mod.object = armature_obj
     if preserve_volume_override is not None:
         armature_mod.use_deform_preserve_volume = preserve_volume_override
-    # In the unlikely case that there was already a modifier with the same name as the new modifier, the new
-    # modifier will have ended up with a different name
+    # In the unlikely case that there was already a modifier with the same name as the new modifier, the new modifier
+    # will have ended up with a different name.
     mod_name = armature_mod.name
     # Context override to let us run the modifier operators on mesh_obj, even if it's not the active object.
-    # Moving the modifier to the first index will prevent an Info message about the applied modifier not being
-    # first and potentially having unexpected results.
+    # Moving the modifier to the first index will prevent an Info message about the applied modifier not being first and
+    # potentially having unexpected results.
     with context.temp_override(object=mesh_obj):
         if bpy.app.version >= (3, 5):
             # Blender 3.5 adds a nice method for reordering modifiers.
@@ -540,6 +536,7 @@ def _apply_armature_modifier_to_mesh(context: Context,
                 orig_show_only_shape = mesh_obj.show_only_shape_key
                 orig_reference_key_mute = shape_keys.reference_key.mute
                 try:
+                    # Currently, the reference shape key is always the first shape key.
                     mesh_obj.active_shape_key_index = 0
                     mesh_obj.show_only_shape_key = True
                     shape_keys.reference_key.mute = False
@@ -580,12 +577,14 @@ def apply_armature_to_mesh_with_shape_keys_translation_only(context: Context,
     fast_mesh_shape_key_co_foreach_get(new_shape_key, new_key_cos)
     fast_mesh_shape_key_co_foreach_get(new_shape_key_relative, new_key_relative_cos)
     difference = new_key_cos - new_key_relative_cos
-    # Same as default
+    # The same as the default argument.
     rtol = 1e-05
-    # Default is 1e-08, but Blender shape key coordinates and mesh positions are single-precision float.
+    # The default argument is 1e-08, but Blender shape key coordinates and mesh positions are single-precision float, so
+    # increase the absolute tolerance slightly.
     atol = 1e-06
-    # Only if the shape key has any effect do the other shape keys need to be updated.
-    if not np.allclose(difference, 0, rtol=rtol, atol=atol, equal_nan=True):
+    if np.allclose(difference, 0, rtol=rtol, atol=atol, equal_nan=True):
+        print(f"Skipped '{mesh_obj.name}' because it is not affected by the new pose")
+    else:
         # `new_key_relative_cos` isn't needed any more, so re-use it to store other shape key cos.
         shape_key_cos = new_key_relative_cos
         # Array to store updated shape keys in, to avoid allocating a new array each time.
@@ -618,70 +617,19 @@ def apply_armature_to_mesh_with_shape_keys_translation_only(context: Context,
     mesh_obj.shape_key_remove(new_shape_key)
 
 
-def apply_armature_to_mesh_with_shape_keys(context: Context,
-                                           armature_obj: Object,
-                                           mesh_obj: Object,
-                                           posed_deform_bone_names: Iterable[str],
-                                           preserve_volume_override: bool | None,
-                                           performance_mode: str):
-    me = cast(Mesh, mesh_obj.data)
-
-    if performance_mode == 'EXACT':
-        affected_rigged_vertex_indices = get_rigged_vertex_indices(mesh_obj, posed_deform_bone_names)
-        if len(affected_rigged_vertex_indices) == 0:
-            # No vertices are affected by the new pose, so there is nothing to do.
-            print(f"Skipped '{mesh_obj.name}' because it is not affected by the new pose")
-            return
-        all_vertices_affected = len(me.vertices) == len(affected_rigged_vertex_indices)
-    else:
-        # 'FAST' mode will change these, otherwise it is assumed that all vertices are affected by the new pose.
-        affected_rigged_vertex_indices = None
-        all_vertices_affected = True
-
-    # The active shape key will be changed, so save the current active index, so it can be restored afterwards
-    old_active_shape_key_index = mesh_obj.active_shape_key_index
-
-    # Shape key pinning shows the active shape key in the viewport without blending; effectively what you see when
-    # in edit mode. Combined with an armature modifier, we can use this to figure out the correct positions for all
-    # the shape keys.
-    # Save the current value, so it can be restored afterwards.
-    old_show_only_shape_key = mesh_obj.show_only_shape_key
-    mesh_obj.show_only_shape_key = True
-
-    # TODO: Use try-finally to ensure original settings are always restored
-
-    # Temporarily remove vertex_groups from and disable mutes on shape keys because they affect pinned shape keys
-    shape_key_vertex_groups = []
-    shape_key_mutes = []
-    key_blocks = me.shape_keys.key_blocks
-    for shape_key in key_blocks:
-        shape_key_vertex_groups.append(shape_key.vertex_group)
-        shape_key.vertex_group = ''
-        shape_key_mutes.append(shape_key.mute)
-        shape_key.mute = False
-
-    # TODO: Instead of disabling modifiers, add a new object the the scene collection that uses the same Mesh as
-    #  mesh_obj. And then add the modifier to that. Once done, the newly created Object can be deleted.
-    # Temporarily disable all modifiers from showing in the viewport so that they have no effect
-    mods_to_reenable_viewport = []
-    for mod in mesh_obj.modifiers:
-        if mod.show_viewport:
-            mod.show_viewport = False
-            mods_to_reenable_viewport.append(mod)
-
-    # Temporarily add a new armature modifier
-    armature_mod = cast(ArmatureModifier, mesh_obj.modifiers.new("PoseToRest", 'ARMATURE'))
-    armature_mod.object = armature_obj
-    if preserve_volume_override is not None:
-        armature_mod.use_deform_preserve_volume = preserve_volume_override
-
-    # coordinatess are xyz positions and get flattened when using the foreach_set/foreach_get functions, so the array
-    # length will be 3 times the number of vertices
+def _apply_armature_to_mesh_with_shape_keys_impl(context: Context,
+                                                 mesh_obj: Object,
+                                                 me: Mesh,
+                                                 performance_mode: str,
+                                                 all_vertices_affected: bool,
+                                                 affected_rigged_vertex_indices):
+    # Coordinates are xyz positions and get flattened when using the foreach_set/foreach_get functions, so the array
+    # length will be 3 times the number of vertices.
     co_length = len(me.vertices) * 3
     # We can re-use the same array over and over
     eval_verts_cos_array = np.empty(co_length, dtype=np.single)
 
-    # depsgraph lets us evaluate objects and get their state after the effect of modifiers and shape keys
+    # A Depsgraph lets us evaluate objects and get their state after the effect of modifiers and shape keys.
     depsgraph: Depsgraph | None = None
     evaluated_mesh_obj = None
 
@@ -690,15 +638,15 @@ def apply_armature_to_mesh_with_shape_keys(context: Context,
     def get_eval_cos_array():
         nonlocal depsgraph
         nonlocal evaluated_mesh_obj
-        # Get the depsgraph and evaluate the mesh if we haven't done so already
+        # Get the Depsgraph and evaluate the mesh if we haven't done so already.
         if depsgraph is None or evaluated_mesh_obj is None:
             depsgraph = context.evaluated_depsgraph_get()
             evaluated_mesh_obj = mesh_obj.evaluated_get(depsgraph)
         else:
-            # If we already have the depsgraph and evaluated mesh, in order for the change to the active shape
-            # key to take effect, the depsgraph has to be updated
+            # If we already have the depsgraph and evaluated mesh, in order for the change to the active shape key to
+            # take effect, the depsgraph has to be updated.
             depsgraph.update()
-        # Get the cos of the vertices from the evaluated mesh
+        # Get the cos of the vertices from the evaluated mesh.
         evaluated_mesh = cast(Mesh, evaluated_mesh_obj.data)
         if has_position_attribute:
             position_attribute = evaluated_mesh.attributes.get("position")
@@ -712,28 +660,33 @@ def apply_armature_to_mesh_with_shape_keys(context: Context,
 
     # Same as default
     rtol = 1e-05
-    # Default is 1e-08, but Blender shape key coordinates and mesh positions are single-precision float
+    # Default is 1e-08, but Blender shape key coordinates and mesh positions are single-precision float.
     atol = 1e-06
 
     print(f"Processing '{mesh_obj.name}'")
 
+    key_blocks = me.shape_keys.key_blocks
     skip_key_blocks = set()
     for i, shape_key in enumerate(key_blocks):
         if i in skip_key_blocks:
             # The shape key could be processed without needing to evaluate the mesh, so continue to the next shape key.
             continue
-        # As shape key pinning is enabled, when we change the active shape key, it will change the state of the mesh
+        # As shape key pinning is enabled, when we change the active shape key, it will change the state of the mesh.
         mesh_obj.active_shape_key_index = i
         # The cos of the vertices of the evaluated mesh include the effect of the pinned shape key and all the
-        # modifiers (in this case, only the armature modifier we added since all the other modifiers are disabled in
-        # the viewport).
-        # This combination gives the same effect as if we'd applied the armature modifier to a mesh with the same
-        # shape as the active shape key, so we can simply set the shape key to the evaluated mesh position.
+        # modifiers (in this case, only the armature modifier we added since all the other modifiers are disabled in the
+        # viewport).
+        # This combination gives the same effect as if we'd applied the armature modifier to a mesh with the same shape
+        # as the active shape key, so we can simply set the shape key to the evaluated mesh position.
         #
-        # Get the evaluated cos
+        # Get the evaluated coordinates.
         evaluated_cos = get_eval_cos_array()
         if i == 0:
-            # Find which shape keys are affected the same as the reference key and can therefore
+            # Find which shape keys are affected the same as the reference key and can therefore have those affected
+            # areas set the same.
+            # Consider an eye blink shape key when the new pose only rotates the arms. The affected area of the model
+            # will only be the arms, so the affected area in the eye blink shape key can be set to the affected area of
+            # the reference shape key with the new pose applied.
             original_reference_key_cos = np.empty_like(evaluated_cos)
             original_reference_key_cos_vector_view = original_reference_key_cos.view()
             original_reference_key_cos_vector_view.shape = (-1, 3)
@@ -751,7 +704,7 @@ def apply_armature_to_mesh_with_shape_keys(context: Context,
                                                      atol=atol,
                                                      equal_nan=True)
                 unaffected_by_pose_vector_mask = np.all(unaffected_by_pose_mask, axis=1)
-                # Invert in-place.
+                # Invert in-place and assign a new variable.
                 affected_by_pose_vector_mask = np.logical_not(unaffected_by_pose_vector_mask,
                                                               out=unaffected_by_pose_vector_mask)
                 affected_rigged_vertex_indices = np.flatnonzero(affected_by_pose_vector_mask)
@@ -793,13 +746,13 @@ def apply_armature_to_mesh_with_shape_keys(context: Context,
                     fast_mesh_shape_key_co_foreach_set(sk, original_other_key_cos)
                     skip_key_blocks.add(j)
 
-        # And set the shape key to those same cos
+        # And set the shape key to those same cos.
         fast_mesh_shape_key_co_foreach_set(shape_key, evaluated_cos)
-        # If it's the basis shape key, we also have to set the mesh vertices to match, otherwise the two will be
-        # desynced until Edit mode has been entered and exited, which can cause odd behaviour when creating shape
-        # keys with from_mix=False or when removing all shape keys.
+        # If it's the reference shape key, we also have to set the mesh vertices to match, otherwise the two will be
+        # desynced until Edit mode has been entered and exited, which can cause odd behaviour when creating shape keys
+        # with from_mix=False or when removing all shape keys.
         if i == 0:
-            mesh_data = cast(Mesh, mesh_obj.data)
+            mesh_data = cast(Mesh, me)
             if has_position_attribute:
                 position_attribute = mesh_data.attributes.get("position")
                 if (position_attribute
@@ -809,15 +762,77 @@ def apply_armature_to_mesh_with_shape_keys(context: Context,
             else:
                 mesh_data.vertices.foreach_set("co", evaluated_cos)
 
-    # Restore temporarily changed attributes and remove the added armature modifier
-    for mod in mods_to_reenable_viewport:
-        mod.show_viewport = True
-    mesh_obj.modifiers.remove(armature_mod)
-    for shape_key, vertex_group, mute in zip(me.shape_keys.key_blocks, shape_key_vertex_groups, shape_key_mutes):
-        shape_key.vertex_group = vertex_group
-        shape_key.mute = mute
-    mesh_obj.active_shape_key_index = old_active_shape_key_index
-    mesh_obj.show_only_shape_key = old_show_only_shape_key
+
+def apply_armature_to_mesh_with_shape_keys(context: Context,
+                                           armature_obj: Object,
+                                           mesh_obj: Object,
+                                           posed_deform_bone_names: Iterable[str],
+                                           preserve_volume_override: bool | None,
+                                           performance_mode: str):
+    me = cast(Mesh, mesh_obj.data)
+
+    if performance_mode == 'EXACT':
+        # Find the indices of all vertices that are rigged to a posed bone (or a bone with a posed parent recursively).
+        affected_rigged_vertex_indices = get_rigged_vertex_indices(mesh_obj, posed_deform_bone_names)
+        if len(affected_rigged_vertex_indices) == 0:
+            # No vertices are affected by the new pose, so there is nothing to do.
+            print(f"Skipped '{mesh_obj.name}' because it is not affected by the new pose")
+            return
+        all_vertices_affected = len(me.vertices) == len(affected_rigged_vertex_indices)
+    else:
+        # 'FAST' mode will change these in the implementation, otherwise it is assumed that all vertices are affected by
+        # the new pose.
+        affected_rigged_vertex_indices = None
+        all_vertices_affected = True
+
+    # Store the current values of properties that will be changed to apply the armature, so that the properties can be
+    # restored to their original values afterwards.
+    old_active_shape_key_index = mesh_obj.active_shape_key_index
+    old_show_only_shape_key = mesh_obj.show_only_shape_key
+    key_blocks = me.shape_keys.key_blocks
+    shape_key_vertex_groups_and_mutes = [(sk.vertex_group, sk.mute) for sk in key_blocks]
+    modifier_show_viewports = [mod.show_viewport for mod in mesh_obj.modifiers]
+
+    armature_mod_name = None
+
+    try:
+        # Shape key pinning shows the active shape key in the viewport without blending; effectively what you see when
+        # in edit mode. Combined with an armature modifier, we can use this to figure out the correct positions for all
+        # the shape keys.
+        mesh_obj.show_only_shape_key = True
+        key_blocks = me.shape_keys.key_blocks
+        # Remove vertex_groups from and disable mutes on shape keys because they affect pinned shape keys.
+        for shape_key in key_blocks:
+            shape_key.vertex_group = ''
+            shape_key.mute = False
+        # Disable all modifiers from showing in the viewport so that they have no effect.
+        for mod in mesh_obj.modifiers:
+            mod.show_viewport = False
+
+        # Temporarily add a new armature modifier.
+        armature_mod = cast(ArmatureModifier, mesh_obj.modifiers.new("PoseToRest", 'ARMATURE'))
+        armature_mod_name = armature_mod.name
+        armature_mod.object = armature_obj
+        if preserve_volume_override is not None:
+            armature_mod.use_deform_preserve_volume = preserve_volume_override
+
+        _apply_armature_to_mesh_with_shape_keys_impl(context, mesh_obj, me, performance_mode, all_vertices_affected,
+                                                     affected_rigged_vertex_indices)
+    finally:
+        # Remove the temporarily added armature modifier.
+        if armature_mod_name is not None:
+            mesh_obj.modifiers.remove(mesh_obj.modifiers[armature_mod_name])
+        # Restore modifiers `.show_viewport` to their original values.
+        for mod, orig_show_viewport in zip(mesh_obj.modifiers, modifier_show_viewports):
+            mod.show_viewport = orig_show_viewport
+        # Restore shape key vertex groups and mutes.
+        for shape_key, (vertex_group, mute) in zip(me.shape_keys.key_blocks, shape_key_vertex_groups_and_mutes):
+            shape_key.vertex_group = vertex_group
+            shape_key.mute = mute
+        # Restore active shape key index.
+        mesh_obj.active_shape_key_index = old_active_shape_key_index
+        # Restore `.show_only_shape_key`/'Shape key pinning'.
+        mesh_obj.show_only_shape_key = old_show_only_shape_key
 
 
 # Registration
