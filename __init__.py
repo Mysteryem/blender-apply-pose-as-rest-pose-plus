@@ -455,8 +455,11 @@ class ApplyPoseAsRestPosePlus(Operator):
                 pose_bones = armature_obj.pose.bones
                 bones = cast(Armature, armature_obj.data).bones
                 selected_mask = np.empty(len(bones), dtype=bool)
+                hide_mask = np.empty(len(bones), dtype=bool)
                 bones.foreach_get("select", selected_mask)
-                deselected_bone_indices = np.flatnonzero(~selected_mask)
+                bones.foreach_get("hide", hide_mask)
+                # Consider hidden bones to always be deselected.
+                deselected_bone_indices = np.flatnonzero((~selected_mask) | hide_mask)
                 basis_matrices = np.empty((len(pose_bones), 4, 4), dtype=np.single)
                 basis_matrices_flat_view = basis_matrices.view()
                 basis_matrices_flat_view.shape = -1
