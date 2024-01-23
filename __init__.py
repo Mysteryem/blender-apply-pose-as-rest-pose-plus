@@ -375,7 +375,7 @@ class ApplyPoseAsRestPosePlus(Operator):
                              " This can rarely skip vertices that are moved by multiple bones but end up in the same"
                              " place"),
             ('EXACT', "Exact", "All vertices that are rigged to the armature are checked"),
-            ('DEBUG', "Debug", "Assumes all vertices are affected by the new pose"),
+            # ('DEBUG', "Debug", "Assumes all vertices are affected by the new pose"),
         ],
         name="Mode",
         default='FAST',
