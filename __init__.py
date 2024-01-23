@@ -165,7 +165,7 @@ def get_posed_deform_bone_names(armature_pose: Pose):
         if pose_bone.name in directly_posed_bone_names:
             # Bone is posed directly.
             return True
-        # Check bone's parent, recursively, is posed.
+        # Check if the bone's parent, recursively, is posed.
         parent = pose_bone.parent
         return parent is not None and is_pose_bone_posed(parent)
 
@@ -372,7 +372,8 @@ class ApplyPoseAsRestPosePlus(Operator):
     performance_mode: EnumProperty(
         items=[
             ('FAST', "Fast", "Only the vertices of the Basis that end up in a new position from the pose are checked."
-                             " This can skip vertices that are moved by multiple bones but end up in the same place"),
+                             " This can rarely skip vertices that are moved by multiple bones but end up in the same"
+                             " place"),
             ('EXACT', "Exact", "All vertices that are rigged to the armature are checked"),
             ('DEBUG', "Debug", "Assumes all vertices are affected by the new pose"),
         ],
@@ -404,9 +405,12 @@ class ApplyPoseAsRestPosePlus(Operator):
                 self.report({'ERROR'}, f"Cannot be applied to multi-user meshes: {obj!r}")
                 return False
             if obj.library is not None:
+                # The mesh is not editable.
                 self.report({'ERROR'}, f"Cannot be applied to meshes linked from a library: {obj!r}")
                 return False
             if obj.mode == 'EDIT':
+                # Most mesh data is unavailable while a mesh is in Edit mode.
+                # Should only be possible if an addon changes the active object while in Edit mode.
                 self.report({'ERROR'}, f"Cannot be applied to meshes that are in Edit mode: {obj!r}")
                 return False
         return True
