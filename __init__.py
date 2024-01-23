@@ -337,6 +337,12 @@ class ApplyPoseAsRestPosePlus(Operator):
     bl_label = "Apply Pose as Rest Pose Plus"
     bl_options = {'REGISTER', 'UNDO'}
 
+    selected: BoolProperty(
+        name="Selected",
+        description="Only affect selected bones",
+        default=False,
+    )
+
     preserve_volume: EnumProperty(
         items=[
             ('MODIFIER', "Use Modifier Settings", "Use the Preserve Volume setting of each Armature modifier when"
@@ -347,6 +353,12 @@ class ApplyPoseAsRestPosePlus(Operator):
         name="Preserve Volume",
         description="Use the Preserve Volume setting when applying the pose to meshes",
         default='MODIFIER',
+    )
+
+    ignore_disabled_modifiers: BoolProperty(
+        name="Ignore disabled modifiers",
+        description="Ignore disabled armature modifiers when checking if a mesh is rigged to the armature",
+        default=False,
     )
 
     mesh_objects_subset: EnumProperty(
@@ -363,12 +375,6 @@ class ApplyPoseAsRestPosePlus(Operator):
         default='VIEW_LAYER',
     )
 
-    ignore_disabled_modifiers: BoolProperty(
-        name="Ignore disabled modifiers",
-        description="Ignore disabled armature modifiers when checking if a mesh is rigged to the armature",
-        default=False,
-    )
-
     performance_mode: EnumProperty(
         items=[
             ('FAST', "Fast", "Only the vertices of the Basis that end up in a new position from the pose are checked."
@@ -379,12 +385,6 @@ class ApplyPoseAsRestPosePlus(Operator):
         ],
         name="Mode",
         default='FAST',
-    )
-
-    selected: BoolProperty(
-        name="Selected",
-        description="Only affect selected bones",
-        default=False,
     )
 
     @classmethod
