@@ -447,7 +447,9 @@ class ApplyPoseAsRestPosePlus(Operator):
             return {'CANCELLED'}
 
         deselected_bone_indices = None
-        deselected_bone_basis_matrices = None
+        deselected_bone_rotations = None
+        deselected_bone_scales = None
+        deselected_bone_locations = None
         try:
             if self.selected:
                 # Temporarily clear the pose of deselected bones, apply the armature as normal and then restore the pose
@@ -460,17 +462,51 @@ class ApplyPoseAsRestPosePlus(Operator):
                 bones.foreach_get("hide", hide_mask)
                 # Consider hidden bones to always be deselected.
                 deselected_bone_indices = np.flatnonzero((~selected_mask) | hide_mask)
-                basis_matrices = np.empty((len(pose_bones), 4, 4), dtype=np.single)
-                basis_matrices_flat_view = basis_matrices.view()
-                basis_matrices_flat_view.shape = -1
-                pose_bones.foreach_get("matrix_basis", basis_matrices_flat_view)
-                deselected_bone_basis_matrices = basis_matrices[deselected_bone_indices]
-                matrix_basis_identity = np.identity(4, dtype=np.single).reshape(1, 4, 4)
-                # Set the deselected bones' basis matrices to the identity matrix.
-                basis_matrices[deselected_bone_indices] = matrix_basis_identity
-                # Update all the basis matrices.
-                pose_bones.foreach_set("matrix_basis", basis_matrices_flat_view)
-                # Necessary to correctly update the pose bone positions.
+
+                # Get current locations.
+                locations = np.empty((len(pose_bones), 3), dtype=np.single)
+                locations_flat = locations.view()
+                locations_flat.shape = -1
+                pose_bones.foreach_get("location", locations_flat)
+                deselected_bone_locations = locations[deselected_bone_indices]
+                # Set the location of all deselected bones to (0, 0, 0).
+                locations[deselected_bone_indices] = np.zeros((1, 3), dtype=locations.dtype)
+                pose_bones.foreach_set("location", locations_flat)
+
+                # Get current scales.
+                scales = np.empty((len(pose_bones), 3), dtype=np.single)
+                scales_flat = scales.view()
+                scales_flat.shape = -1
+                pose_bones.foreach_get("scale", scales_flat)
+                deselected_bone_scales = scales[deselected_bone_indices]
+                # Set the scale of all deselected bones to (1, 1, 1).
+                scales[deselected_bone_indices] = np.ones((1, 3), dtype=scales.dtype)
+                pose_bones.foreach_set("scale", scales_flat)
+
+                # Get current rotations.
+                # Each bone can have a different rotation mode, so foreach_get/foreach_set cannot be used.
+                deselected_bone_rotations = []
+                axis_angle_identity = (0.0, 0.0, 0.0, 0.0)
+                for i in deselected_bone_indices.data:
+                    pose_bone = pose_bones[i]
+                    match pose_bone.rotation_mode:
+                        case 'QUATERNION':
+                            pose_bone_rotation = pose_bone.rotation_quaternion
+                            rotation = pose_bone_rotation.copy()
+                            # Set to identity.
+                            pose_bone_rotation.identity()
+                        case 'AXIS_ANGLE':
+                            rotation = tuple(pose_bone.rotation_axis_angle)
+                            # Set to identity.
+                            pose_bone.rotation_axis_angle = axis_angle_identity
+                        case _:
+                            pose_bone_rotation = pose_bone.rotation_euler
+                            rotation = pose_bone_rotation.copy()
+                            # Set to identity.
+                            pose_bone_rotation.zero()
+                    deselected_bone_rotations.append(rotation)
+
+                # Ensure the changes to pose bone transforms are taken into account.
                 armature_obj.update_tag(refresh={'OBJECT'})
 
             posed_deform_bone_names, translation_only = get_posed_deform_bone_names(armature_obj.pose)
@@ -533,14 +569,36 @@ class ApplyPoseAsRestPosePlus(Operator):
                 bpy.ops.pose.armature_apply(selected=self.selected)
         finally:
             # If the pose was only applied to selected bones, restore the matrices of deselected bones.
-            if self.selected and deselected_bone_indices is not None and deselected_bone_basis_matrices is not None:
-                basis_matrices = np.empty((len(pose_bones), 4, 4), dtype=np.single)
-                basis_matrices_flat_view = basis_matrices.view()
-                basis_matrices_flat_view.shape = -1
-                pose_bones.foreach_get("matrix_basis", basis_matrices_flat_view)
-                basis_matrices[deselected_bone_indices] = deselected_bone_basis_matrices
-                pose_bones.foreach_set("matrix_basis", basis_matrices_flat_view)
-                # Necessary to visibly update the pose bone positions.
+            if self.selected and deselected_bone_indices is not None:
+                pose_bones = armature_obj.pose.bones
+                if deselected_bone_locations is not None:
+                    locations = np.empty((len(pose_bones), 3), dtype=np.single)
+                    locations_flat = locations.view()
+                    locations_flat.shape = -1
+                    pose_bones.foreach_get("location", locations_flat)
+                    locations[deselected_bone_indices] = deselected_bone_locations
+                    pose_bones.foreach_set("location", locations_flat)
+
+                if deselected_bone_scales is not None:
+                    scales = np.empty((len(pose_bones), 3), dtype=np.single)
+                    scales_flat = scales.view()
+                    scales_flat.shape = -1
+                    pose_bones.foreach_get("scale", scales_flat)
+                    scales[deselected_bone_indices] = deselected_bone_scales
+                    pose_bones.foreach_set("scale", scales_flat)
+
+                if deselected_bone_rotations is not None:
+                    for i, rotation in zip(deselected_bone_indices.data, deselected_bone_rotations):
+                        pose_bone = pose_bones[i]
+                        match pose_bone.rotation_mode:
+                            case 'QUATERNION':
+                                pose_bone.rotation_quaternion = rotation
+                            case 'AXIS_ANGLE':
+                                pose_bone.rotation_axis_angle = rotation
+                            case _:
+                                pose_bone.rotation_euler = rotation
+
+                # Ensure the pose bones are visibly updated.
                 armature_obj.update_tag(refresh={'OBJECT'})
 
         self.report({'INFO'}, "Pose successfully applied as rest pose.")
