@@ -32,6 +32,7 @@ from bpy.types import (
     ArmatureModifier,
     Context,
     Depsgraph,
+    Menu,
     Mesh,
     Object,
     Operator,
@@ -379,6 +380,12 @@ class ApplyPoseAsRestPosePlus(Operator):
         default='FAST',
     )
 
+    selected: BoolProperty(
+        name="Selected",
+        description="Only affect selected bones",
+        default=False,
+    )
+
     @classmethod
     def poll(cls, context):
         pose_object = context.pose_object
@@ -439,64 +446,99 @@ class ApplyPoseAsRestPosePlus(Operator):
         if not self.validate_objects(rigged_mesh_objects):
             return {'CANCELLED'}
 
-        posed_deform_bone_names, translation_only = get_posed_deform_bone_names(armature_obj.pose)
+        deselected_bone_indices = None
+        deselected_bone_basis_matrices = None
+        try:
+            if self.selected:
+                # Temporarily clear the pose of deselected bones, apply the armature as normal and then restore the pose
+                # of the deselected bones.
+                pose_bones = armature_obj.pose.bones
+                bones = cast(Armature, armature_obj.data).bones
+                selected_mask = np.empty(len(bones), dtype=bool)
+                bones.foreach_get("select", selected_mask)
+                deselected_bone_indices = np.flatnonzero(~selected_mask)
+                basis_matrices = np.empty((len(pose_bones), 4, 4), dtype=np.single)
+                basis_matrices_flat_view = basis_matrices.view()
+                basis_matrices_flat_view.shape = -1
+                pose_bones.foreach_get("matrix_basis", basis_matrices_flat_view)
+                deselected_bone_basis_matrices = basis_matrices[deselected_bone_indices]
+                matrix_basis_identity = np.identity(4, dtype=np.single).reshape(1, 4, 4)
+                # Set the deselected bones' basis matrices to the identity matrix.
+                basis_matrices[deselected_bone_indices] = matrix_basis_identity
+                # Update all the basis matrices.
+                pose_bones.foreach_set("matrix_basis", basis_matrices_flat_view)
+                # Necessary to correctly update the pose bone positions.
+                armature_obj.update_tag(refresh={'OBJECT'})
 
-        if len(posed_deform_bone_names) != 0:
-            mesh_processing_start = perf_counter()
-            for mesh_obj in rigged_mesh_objects:
-                mesh = cast(Mesh, mesh_obj.data)
-                if mesh.shape_keys and mesh.shape_keys.key_blocks:
-                    # The mesh has shape keys
-                    shape_keys = mesh.shape_keys
-                    key_blocks = shape_keys.key_blocks
-                    if len(key_blocks) == 1:
-                        # The mesh only has a basis shape key, so it can be removed it and added back afterward.
-                        # Get Reference Key.
-                        reference_shape_key = key_blocks[0]
-                        # Save the name of the Reference Key.
-                        original_basis_name = reference_shape_key.name
-                        # Remove the basis shape key so there are now no shape keys.
-                        mesh_obj.shape_key_remove(reference_shape_key)
-                        # Apply the pose to the mesh.
-                        apply_armature_to_mesh_with_no_shape_keys(context,
-                                                                  armature_obj,
-                                                                  mesh_obj,
-                                                                  preserve_volume_override)
-                        # Add the basis shape key back with the same name as before.
-                        mesh_obj.shape_key_add(name=original_basis_name)
-                    else:
-                        # Apply the pose to the mesh, taking into account the shape keys.
-                        if translation_only:
-                            # Optimised for a new pose which only translates bones.
-                            apply_armature_to_mesh_with_shape_keys_translation_only(context,
-                                                                                    armature_obj,
-                                                                                    mesh_obj,
-                                                                                    preserve_volume_override)
+            posed_deform_bone_names, translation_only = get_posed_deform_bone_names(armature_obj.pose)
+
+            if len(posed_deform_bone_names) != 0:
+                mesh_processing_start = perf_counter()
+                for mesh_obj in rigged_mesh_objects:
+                    mesh = cast(Mesh, mesh_obj.data)
+                    if mesh.shape_keys and mesh.shape_keys.key_blocks:
+                        # The mesh has shape keys
+                        shape_keys = mesh.shape_keys
+                        key_blocks = shape_keys.key_blocks
+                        if len(key_blocks) == 1:
+                            # The mesh only has a basis shape key, so it can be removed it and added back afterward.
+                            # Get Reference Key.
+                            reference_shape_key = key_blocks[0]
+                            # Save the name of the Reference Key.
+                            original_basis_name = reference_shape_key.name
+                            # Remove the basis shape key so there are now no shape keys.
+                            mesh_obj.shape_key_remove(reference_shape_key)
+                            # Apply the pose to the mesh.
+                            apply_armature_to_mesh_with_no_shape_keys(context,
+                                                                      armature_obj,
+                                                                      mesh_obj,
+                                                                      preserve_volume_override)
+                            # Add the basis shape key back with the same name as before.
+                            mesh_obj.shape_key_add(name=original_basis_name)
                         else:
-                            apply_armature_to_mesh_with_shape_keys(context,
-                                                                   armature_obj,
-                                                                   mesh_obj,
-                                                                   posed_deform_bone_names,
-                                                                   preserve_volume_override,
-                                                                   self.performance_mode)
-                else:
-                    # The mesh doesn't have shape keys, so we can easily apply the pose to the mesh.
-                    apply_armature_to_mesh_with_no_shape_keys(context, armature_obj, mesh_obj, preserve_volume_override)
+                            # Apply the pose to the mesh, taking into account the shape keys.
+                            if translation_only:
+                                # Optimised for a new pose which only translates bones.
+                                apply_armature_to_mesh_with_shape_keys_translation_only(context,
+                                                                                        armature_obj,
+                                                                                        mesh_obj,
+                                                                                        preserve_volume_override)
+                            else:
+                                apply_armature_to_mesh_with_shape_keys(context,
+                                                                       armature_obj,
+                                                                       mesh_obj,
+                                                                       posed_deform_bone_names,
+                                                                       preserve_volume_override,
+                                                                       self.performance_mode)
+                    else:
+                        # The mesh doesn't have shape keys, so we can easily apply the pose to the mesh.
+                        apply_armature_to_mesh_with_no_shape_keys(context, armature_obj, mesh_obj, preserve_volume_override)
 
-            mesh_processing_end = perf_counter()
-            print(f"Mesh processing took {(mesh_processing_end - mesh_processing_start) * 1000:f}ms")
-        else:
-            print("No deform bones (or their recursive parents) were posed")
+                mesh_processing_end = perf_counter()
+                print(f"Mesh processing took {(mesh_processing_end - mesh_processing_start) * 1000:f}ms")
+            else:
+                print("No deform bones (or their recursive parents) were posed")
 
-        # Once the mesh and shape keys (if any) have been applied, the last step is to apply the current pose of the
-        # bones as the new rest pose.
-        #
-        # From the poll function, armature_obj must be in pose mode and be the `.pose_object`, but maybe it's possible
-        # it might not be the active object. We can use an operator override to tell the operator to treat armature_obj
-        # as if it's the active object even if it's not, skipping the need to actually set armature_obj as the active
-        # object.
-        with context.temp_override(active_object=armature_obj):
-            bpy.ops.pose.armature_apply()
+            # Once the mesh and shape keys (if any) have been applied, the last step is to apply the current pose of the
+            # bones as the new rest pose.
+            #
+            # From the poll function, armature_obj must be in pose mode and be the `.pose_object`, but maybe it's possible
+            # it might not be the active object. We can use an operator override to tell the operator to treat armature_obj
+            # as if it's the active object even if it's not, skipping the need to actually set armature_obj as the active
+            # object.
+            with context.temp_override(active_object=armature_obj):
+                bpy.ops.pose.armature_apply(selected=self.selected)
+        finally:
+            # If the pose was only applied to selected bones, restore the matrices of deselected bones.
+            if self.selected and deselected_bone_indices is not None and deselected_bone_basis_matrices is not None:
+                basis_matrices = np.empty((len(pose_bones), 4, 4), dtype=np.single)
+                basis_matrices_flat_view = basis_matrices.view()
+                basis_matrices_flat_view.shape = -1
+                pose_bones.foreach_get("matrix_basis", basis_matrices_flat_view)
+                basis_matrices[deselected_bone_indices] = deselected_bone_basis_matrices
+                pose_bones.foreach_set("matrix_basis", basis_matrices_flat_view)
+                # Necessary to visibly update the pose bone positions.
+                armature_obj.update_tag(refresh={'OBJECT'})
 
         self.report({'INFO'}, "Pose successfully applied as rest pose.")
         return {'FINISHED'}
@@ -837,10 +879,10 @@ def apply_armature_to_mesh_with_shape_keys(context: Context,
 
 # Registration
 
-def draw_in_menu(self, context: Context):
+def draw_in_menu(self: Menu, context: Context):
     self.layout.separator()
-    # CATS used the KEY_HLT icon for years, so it may be best to leave the icon as is because people are used to it.
-    self.layout.operator(ApplyPoseAsRestPosePlus.bl_idname)
+    self.layout.operator(ApplyPoseAsRestPosePlus.bl_idname).selected = False
+    self.layout.operator(ApplyPoseAsRestPosePlus.bl_idname, text="Apply Selected as Rest Pose Plus").selected = True
 
 
 # Links for Right Click -> Online Manual.
