@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Apply Pose as Rest Pose Plus",
     "author": "Mysteryem",
-    "version": (0, 0, 1),
+    "version": (1, 0, 0),
     "blender": (3, 3, 0),
     "location": "Pose > Apply > Apply Pose as Rest Pose Plus",
     "description": "Apply Pose as Rest Pose, but also applies to meshes rigged to the armature. Supports shape keys.",
